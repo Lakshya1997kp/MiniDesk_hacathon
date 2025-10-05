@@ -1,0 +1,205 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HelpDesk Mini</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; }
+      header { padding: 12px 16px; background:#111; color:#fff; display:flex; gap:12px; align-items:center; }
+      main { padding: 16px; max-width: 960px; margin: 0 auto; }
+      input, select, textarea, button { padding: 8px; margin: 4px 0; }
+      .card { border:1px solid #ddd; border-radius:8px; padding:12px; margin:8px 0; }
+      .sla-breach { color:#b00020; font-weight:600; }
+      nav a { color:#fff; text-decoration:none; margin-right:12px; }
+      .row { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
+      .muted { color:#666; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>HelpDesk Mini</strong>
+      <nav>
+        <a href="#/tickets">Tickets</a>
+        <a href="#/tickets/new">New</a>
+      </nav>
+      <span id="auth-info" style="margin-left:auto"></span>
+    </header>
+    <main>
+      <div id="app"></div>
+    </main>
+    <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+    <script>
+      const html = htm.bind(function(type, props, ...children){
+        const el = document.createElement(type);
+        for (const [k,v] of Object.entries(props||{})){
+          if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+          else if (k === 'value') el.value = v;
+          else if (v !== false && v != null) el.setAttribute(k, v === true ? '' : v);
+        }
+        for (const c of children.flat()){
+          el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+        }
+        return el;
+      });
+
+      const state = { token: localStorage.getItem('token') || '', user: JSON.parse(localStorage.getItem('user')||'null') };
+      function setAuth(token, user){ state.token = token; state.user = user; localStorage.setItem('token', token||''); localStorage.setItem('user', JSON.stringify(user||null)); render(); }
+
+      async function api(path, opts={}){
+        const headers = { 'Content-Type': 'application/json', ...(opts.headers||{}) };
+        if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+        // Idempotency for POST
+        if ((opts.method||'GET').toUpperCase()==='POST') headers['Idempotency-Key'] = cryptoRandom();
+        const res = await fetch(path, { ...opts, headers });
+        const json = await res.json().catch(()=>({}));
+        if (!res.ok) throw json;
+        return json;
+      }
+      function cryptoRandom(){ return Math.random().toString(36).slice(2)+Date.now().toString(36); }
+
+      function slaCountdown(deadline){
+        const end = new Date(deadline).getTime();
+        const rem = end - Date.now();
+        if (rem <= 0) return 'BREACHED';
+        const h = Math.floor(rem/3600000);
+        const m = Math.floor((rem%3600000)/60000);
+        return h+"h "+m+"m";
+      }
+
+      function Login(){
+        let email = 'user@example.com', password='userpass';
+        const onSubmit = async (e)=>{ e.preventDefault();
+          try{
+            const { token, user } = await api('/api/login', { method:'POST', body: JSON.stringify({ email, password }) });
+            setAuth(token, user);
+            location.hash = '#/tickets';
+          }catch(err){ alert(JSON.stringify(err)); }
+        };
+        return html`<div class="card"><h3>Login</h3>
+          <form onsubmit=${onSubmit}>
+            <div><input placeholder="email" value=${email} oninput=${e=>email=e.target.value} /></div>
+            <div><input placeholder="password" type="password" value=${password} oninput=${e=>password=e.target.value} /></div>
+            <button>Login</button>
+          </form>
+        </div>`;
+      }
+
+      function TicketsList(){
+        const container = document.createElement('div');
+        let items = [], next=null, q='';
+        const load = async (offset=0)=>{
+          const res = await api('/api/tickets?limit=10&offset='+offset+'&search='+encodeURIComponent(q));
+          items = offset? items.concat(res.items) : res.items; next = res.next_offset; renderList();
+        };
+        function renderList(){
+          container.innerHTML = '';
+          container.appendChild(html`<div class="row">
+            <input placeholder="search" oninput=${e=>q=e.target.value} />
+            <button onclick=${()=>load(0)}>Search</button>
+            <span class="muted">${items.length} items</span>
+          </div>`);
+          for (const t of items){
+            const breached = t.sla_breached;
+            container.appendChild(html`<div class="card">
+              <div><strong>${t.title}</strong></div>
+              <div class="muted">Priority: ${t.priority} • Status: ${t.status}</div>
+              <div class=${breached? 'sla-breach':''}>SLA: ${breached? 'BREACHED' : slaCountdown(t.sla_deadline)}</div>
+              <div><a href="#/tickets/${t.id}">Open</a></div>
+            </div>`);
+          }
+          if (next!=null) container.appendChild(html`<button onclick=${()=>load(next)}>Load more</button>`);
+        }
+        load(0);
+        return container;
+      }
+
+      function NewTicket(){
+        let title='', description='', priority='Medium';
+        const submit = async (e)=>{ e.preventDefault();
+          try{
+            const t = await api('/api/tickets', { method:'POST', body: JSON.stringify({ title, description, priority }) });
+            location.hash = '#/tickets/'+t.id;
+          }catch(err){ alert(JSON.stringify(err)); }
+        };
+        return html`<div class="card"><h3>New Ticket</h3>
+          <form onsubmit=${submit}>
+            <div><input required placeholder="Title" oninput=${e=>title=e.target.value} /></div>
+            <div><textarea required placeholder="Description" oninput=${e=>description=e.target.value}></textarea></div>
+            <div><select onchange=${e=>priority=e.target.value}>
+              <option>High</option><option selected>Medium</option><option>Low</option>
+            </select></div>
+            <button>Create</button>
+          </form></div>`;
+      }
+
+      function TicketDetail(id){
+        const container = document.createElement('div');
+        let data=null, msg=''; let etagVersion=null; let assignTo=''; let status='';
+        const load = async ()=>{ data = await api('/api/tickets/'+id); etagVersion = data.ticket.version; renderDetail(); };
+        const addComment = async (e)=>{ e.preventDefault(); await api('/api/tickets/'+id+'/comments',{ method:'POST', body: JSON.stringify({ message: msg }) }); msg=''; await load(); };
+        const updateTicket = async (e)=>{ e.preventDefault();
+          try{
+            const headers = { 'If-Match': String(etagVersion) };
+            const body = {}; if (assignTo) body.assigned_to = Number(assignTo); if (status) body.status = status;
+            const updated = await api('/api/tickets/'+id, { method:'PATCH', headers, body: JSON.stringify(body) });
+            etagVersion = updated.version; await load();
+          }catch(err){ alert('Update failed: '+JSON.stringify(err)); }
+        };
+        function renderDetail(){
+          container.innerHTML='';
+          const t = data.ticket;
+          container.appendChild(html`<div class="card">
+            <h3>${t.title}</h3>
+            <div>${t.description}</div>
+            <div class="muted">Priority: ${t.priority} • Status: ${t.status}</div>
+            <div class=${t.sla_breached? 'sla-breach':''}>SLA: ${t.sla_breached? 'BREACHED' : slaCountdown(t.sla_deadline)}</div>
+          </div>`);
+          container.appendChild(html`<div class="card"><h4>Update</h4>
+            <form onsubmit=${updateTicket} class="row">
+              <input placeholder="assign user id" oninput=${e=>assignTo=e.target.value} />
+              <select onchange=${e=>status=e.target.value}>
+                <option value="">Set status...</option>
+                <option>open</option><option>pending</option><option>closed</option>
+              </select>
+              <button>Save</button>
+            </form>
+          </div>`);
+          container.appendChild(html`<div class="card"><h4>Comments</h4>
+            <form onsubmit=${addComment} class="row">
+              <input required placeholder="Write a comment" value="${msg}" oninput=${e=>msg=e.target.value} />
+              <button>Add</button>
+            </form>
+            ${data.comments.map(c=>html`<div class="card"><div>${c.message}</div><div class="muted">by ${c.author_id} • ${c.created_at}</div></div>`) }
+          </div>`);
+          container.appendChild(html`<div class="card"><h4>Timeline</h4>
+            ${data.timeline.map(ev=>html`<div class="row"><span class="muted">${ev.created_at}</span><span>${ev.action}</span></div>`) }
+          </div>`);
+        }
+        load();
+        return container;
+      }
+
+      function Router(){
+        const hash = location.hash || '#/tickets';
+        if (!state.token) return Login();
+        if (hash.startsWith('#/tickets/new')) return NewTicket();
+        if (hash.startsWith('#/tickets/')){
+          const id = hash.split('/')[2];
+          return TicketDetail(id);
+        }
+        return TicketsList();
+      }
+
+      function render(){
+        document.getElementById('auth-info').textContent = state.user? `${state.user.email} (${state.user.role})` : '';
+        const mount = document.getElementById('app');
+        mount.innerHTML = '';
+        mount.appendChild(Router());
+      }
+      window.addEventListener('hashchange', render);
+      render();
+    </script>
+  </body>
+</html>
+
